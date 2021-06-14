@@ -1,0 +1,497 @@
+<html>
+
+	<head>
+		<title>Rainy Day</title>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+		<link rel="preload" as="font" href="fonts/ethnocentric.woff" type="font/woff" crossorigin="anonymous" />
+
+		<style>
+
+			body {
+				margin: 0px;
+				overflow: hidden;
+				background-color: #000000;
+			}
+
+			@font-face {
+				font-family: "ethnocentric";
+				font-display: swap;
+				src: url("fonts/ethnocentric.woff") format("woff");
+			}
+
+    	</style>
+
+	</head>
+
+	<body onload="Startup()">
+
+		<script src="src/threejs/three.min.js"></script>
+		<script src="src/noisejs/perlin.js"></script>
+		<script src="src/Label.js"></script>
+		<script src="src/Generator.js"></script>
+		<script src="src/Drop.js"></script>
+		<script src="src/Cloud.js"></script>
+		<script type="text/javascript">
+
+			// by @unmanuel
+
+			// Service URL pointing to a JSON
+			const URL_SERVICE_RAIN = "https://private-4945e-weather34.apiary-proxy.com/weather34/rain";
+
+			const MAX_DELTA_TIME = 1 / 60;		// FPS limit
+			const MAX_RAIN_AMOUNT = 150;		// Rain never is more than this
+			const MAX_DROPS = 100;				// Drop bucket size
+			const MAX_CLOUDS = 200;				// Cloud bucket size
+			const MAX_CLOUD_DISTANCE = 0.2;		// Maximum distance between clouds
+
+			const CAM_SPEED = -4;				// Low values to avoid nausea
+			const NOISE_SPEED = 4;				// Speed inside the noise matrix
+
+			const MIN_FOG_DISTANCE = 0.5;		// Closest fog value
+			const MAX_FOG_DISTANCE = 20;		// Farthest fog value
+
+			// Fog colors for each time of the day
+			const SKY_COLORS = [
+					0x00000b, 0x00000b, 0x080817, 0x1b1a2e,
+					0x383850, 0x5e5d89, 0x7d6b97, 0x9489c1,
+					0xb6afc5, 0xa1d3f8, 0xa6e4fe, 0x80dafc,
+					0x64c1e7, 0x3e97c9, 0x2571a7, 0x286396,
+					0x416a84, 0x7a8d78, 0x8a8463, 0x744e30,
+					0x38241a, 0x25130d, 0x190a02, 0x02010a
+				];
+
+			// Day names for the main label
+			const DAYS = [ "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" ];
+
+			// Three.js environment
+			let renderer, camera, scene;
+
+			let deltaTime;			// Time in seconds between this and the previous frame
+			let prevTime;			// Previous timestamp
+
+			let veil;				// A black veil useful for transitions
+			let logo;				// A plane facing the camera with the main logo
+			let label;				// The main label showing time and day of the week
+
+			let dropGens;			// Array with drop generators
+
+			let sky;				// A plane facing the camera with the sky background
+			let skyMaterials;		// Materials for each time of the day
+
+			let cloudPool;			// Reservoir of clouds with a maximum bucket size
+			let cloudData;			// References to onscreen clouds
+
+			let prevCloudZ;			// Last cloud placement position in z
+			let nextCloudZ;			// Next cloud placement position in z
+
+			let prevCamPosition;	// Keeps track of the camera's last position
+
+			let hour;				// Current hour according to the device clock
+			let hourOverride;		// Use this if not -1 instead of the real hour
+
+			let defaultRainAmount;	// The amount of rain that is used if loading fails
+			let rainAmounts;		// Loaded rain amounts for each day of the week
+
+			let noiseX;				// General-purpose natural noise cursor
+/*
+			Startup
+
+			Program starts here.
+*/
+			function Startup() {
+				Init();
+				Setup();
+				LoadData();
+			}
+/*
+			Init
+
+			Launches the Three.js environment.
+*/
+			function Init() {
+
+				renderer = new THREE.WebGLRenderer();
+
+				renderer.setSize(window.innerWidth, window.innerHeight);
+				document.body.appendChild(renderer.domElement);
+
+				camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.5, 2000);
+
+				scene = new THREE.Scene();
+				scene.fog = new THREE.Fog(SKY_COLORS[0], MIN_FOG_DISTANCE, MAX_FOG_DISTANCE);
+
+				window.addEventListener("resize", () => { ResizeCanvas(); });
+			}
+/*
+			Setup
+
+			Creates the contents of the scene and sets startup values.
+*/
+			function Setup() {
+				
+				CreateGenerators();
+				CreateSky();
+				CreateClouds();
+				CreateUI();
+
+				prevTime = Date.now() * 0.001;
+
+				prevCloudZ = nextCloudZ = -20;
+
+				prevCamPosition = new THREE.Vector3();
+
+				hour = hourOverride = -1;
+
+				defaultRainAmount = MAX_RAIN_AMOUNT;
+
+				noiseX = 0;
+			}
+/*
+			CreateGenerators
+
+			Generators are created here as a triangular shower head atop the frustum.
+			Rain only falls to the right currently, so some optimization is possible.
+*/
+			function CreateGenerators() {
+
+				let dropTex = new THREE.TextureLoader().load("img/raindrop.png"); // Drop asset
+				let dropMat = new THREE.SpriteMaterial({ map: dropTex, rotation: Math.PI / 8 });
+				
+				let dropPool = [];	// An object pool to be shared by all generators
+
+				let i, j;
+
+				// The global pool of drops is filled
+				for(i = 0; i < MAX_DROPS; ++i)
+					dropPool.push(new Drop(dropMat, "drop_" + i));
+
+				dropGens = [];
+
+				for(i = 0; i <= 10; ++i)
+					for(j = 0; j < 10 + i; ++j)
+						dropGens.push(new Generator(new THREE.Vector3(j * 2 - 20, 10, -i - 10), scene, dropPool));
+			}
+/*
+			CreateSky
+
+			The sky is a textured plane that always floats in front of the camera.
+			Twenty-four textures are loaded to be rotated at each hour of the day.
+*/
+			function CreateSky() {
+
+				let tex;
+
+				skyMaterials = [];
+
+				for(let i = 0; i < 24; ++i) {
+					tex = new THREE.TextureLoader().load("img/sky_" + (i < 10 ? "0" : "") + i + ".png");
+					skyMaterials[i] = new THREE.MeshBasicMaterial({ map: tex, fog: false });
+				}
+
+				sky = new THREE.Mesh(new THREE.PlaneGeometry(3840, 1080), skyMaterials[0]);
+				sky.position.z = -1300;
+
+				scene.add(sky);
+			}
+/*
+			CreateClouds
+
+			Clouds are created from three different
+			appearances and stored on a cloud pool.
+*/
+			function CreateClouds() {
+
+				let texA = new THREE.TextureLoader().load("img/cloud_a.png");
+				let texB = new THREE.TextureLoader().load("img/cloud_b.png");
+				let texC = new THREE.TextureLoader().load("img/cloud_c.png");
+
+				let texs = [texA, texB, texC];
+
+				cloudPool = [];
+
+				for(let i = 0; i < MAX_CLOUDS; ++i)
+					cloudPool.push(new Cloud(new THREE.SpriteMaterial({ map: texs[i % 3], transparent: true }), camera, "cloud_" + i));
+
+				cloudData = {};
+			}
+/*
+			CreateUI
+
+			Adds veil, logo and main label.
+*/
+			function CreateUI() {
+
+				let tex = new THREE.TextureLoader().load("img/logo.png");
+				let mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, fog: false });
+
+				veil = new THREE.Mesh(new THREE.PlaneGeometry(18, 9), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, fog: false }));
+				veil.position.z = -0.75;
+
+				scene.add(veil);
+
+				logo = new THREE.Mesh(new THREE.PlaneGeometry(0.32, 0.32), mat);
+				logo.position.z = -1;
+
+				scene.add(logo);
+
+				label = new Label("", 0, -0.1, -1);
+				
+				scene.add(label.mesh);
+			}
+/*
+			LoadData
+
+			External sources of configuration are loaded and validated,
+			specifically the querystring and a weather service.
+			It has built-in fallback for absence of data and errors.
+*/
+			function LoadData() {
+
+				let params = new URLSearchParams(window.location.search);
+
+				let r = params.get("r");	// r is the rain amount
+				let h = params.get("h");	// h is the hour of the day
+
+				if(h != null && !isNaN(h))
+					hourOverride = h < 0 ? 0 : h > 23 ? 23 : h;
+
+				if(r != null && !isNaN(r)) {
+					
+					defaultRainAmount = r;
+					animate();
+
+				} else {
+
+					let request = new XMLHttpRequest();
+						
+					request.open("GET", URL_SERVICE_RAIN, true);
+					request.responseType = "json";
+					
+					request.onload = function() {
+						
+						if(request.status === 200) {
+
+							rainAmounts = [];
+
+							if(request.response != null && Array.isArray(request.response) && request.response.length > 0) {
+
+								let data = request.response[0];
+
+								if(data.days != null && Array.isArray(data.days))
+									for(let i = 0; i < data.days.length; ++i)
+										if(data.days[i].day != null && !isNaN(data.days[i].day) && data.days[i].amount != null && !isNaN(data.days[i].amount))
+											rainAmounts[data.days[i].day - 1] = data.days[i].amount;
+							}
+						}
+
+						animate();
+					};
+
+					request.onerror = function() {
+						animate();
+					};
+
+					request.send();
+				}
+			}
+/*
+			UpdateGenerators
+
+			Generators are updated and repositioned in front of the camera.
+*/
+			function UpdateGenerators() {
+
+				let rainAmount = rainAmounts != null && rainAmounts.length > 0 ? rainAmounts[(new Date()).getDay()] : defaultRainAmount;
+				rainAmount = rainAmount < 0 ? 0 : rainAmount > MAX_RAIN_AMOUNT ? MAX_RAIN_AMOUNT : rainAmount;
+
+				let maxDelay = 2 + (MAX_RAIN_AMOUNT - rainAmount);
+
+				let x = camera.position.x - prevCamPosition.x;
+				let y = camera.position.y - prevCamPosition.y;
+				let z = camera.position.z - prevCamPosition.z;
+
+				for(let i = 0; i < dropGens.length; ++i) {
+
+					dropGens[i].position.x += x;
+					dropGens[i].position.y += y;
+					dropGens[i].position.z += z;
+
+					dropGens[i].enabled = rainAmount > 0;
+					
+					if(dropGens[i].maxDelay != maxDelay)
+						dropGens[i].SetDelays(maxDelay / 2, maxDelay);
+
+					dropGens[i].Update(deltaTime);
+				}
+			}
+/*
+			UpdateSky
+
+			The sky is updated according to the hour of the day in realtime.
+*/
+			function UpdateSky() {
+
+				sky.position.x += camera.position.x - prevCamPosition.x;
+				sky.position.y += camera.position.y - prevCamPosition.y;
+				sky.position.z += camera.position.z - prevCamPosition.z;
+
+				let h = hourOverride != -1 ? hourOverride : (new Date()).getHours();
+
+				if(hour != h) {
+
+					hour = h;
+
+					sky.material = skyMaterials[hour];
+
+					scene.fog.color.setHex(SKY_COLORS[hour]);
+				}
+			}
+/*
+			UpdateClouds
+
+			New clouds are placed in front of the camera at random distances.
+			Clouds are then processed and removed from the scene if needed.
+*/
+			function UpdateClouds() {
+
+				let cloud;
+
+				prevCloudZ += camera.position.z - prevCamPosition.z;
+
+				if(prevCloudZ < nextCloudZ) {
+
+					nextCloudZ = prevCloudZ;
+
+					let rainAmount = rainAmounts != null && rainAmounts.length > 0 ? rainAmounts[(new Date()).getDay()] : defaultRainAmount;
+					rainAmount = rainAmount < 0 ? 0 : rainAmount > MAX_RAIN_AMOUNT ? MAX_RAIN_AMOUNT : rainAmount;
+
+					if(rainAmount > 0) {
+
+						cloud = cloudPool.length > 0 ? cloudPool.pop() : null;
+
+						if(cloud != null) {
+
+							cloud.sprite.position.x = Math.random() * 40 - 20;
+							cloud.sprite.position.y = 4 + noise.perlin2(noiseX, 1000) * 4;
+							cloud.sprite.position.z = nextCloudZ;
+
+							cloud.sprite.material.opacity = 0;
+
+							scene.add(cloud.sprite);
+							cloudData[cloud.tag] = cloud;
+
+							cloud.alive = true;
+						}
+					}
+				    
+				    nextCloudZ -= Math.random() * MAX_CLOUD_DISTANCE + (MAX_RAIN_AMOUNT - rainAmount) / MAX_RAIN_AMOUNT * 8;
+				}
+
+				let tag;
+
+				for(tag in cloudData) {
+
+					cloud = cloudData[tag];
+
+					cloud.Update(deltaTime);
+
+					if(!cloud.alive) {
+						cloudPool.push(cloud);
+						scene.remove(cloud.sprite);
+						delete cloudData[tag];
+					}
+				}
+			}
+/*
+			UpdateUI
+
+			UI elements are updated and repositioned in front of the camera.
+*/
+			function UpdateUI() {
+
+				let x = camera.position.x - prevCamPosition.x;
+				let y = camera.position.y - prevCamPosition.y;
+				let z = camera.position.z - prevCamPosition.z;
+
+				logo.position.x += x;
+				logo.position.y += y;
+				logo.position.z += z;
+
+				label.mesh.position.x += x;
+				label.mesh.position.y += y;
+				label.mesh.position.z += z;
+
+				if(veil.material.opacity > 0) {
+					
+					veil.position.x += x;
+					veil.position.y += y;
+					veil.position.z += z;
+					
+					veil.material.opacity -= deltaTime;
+
+					if(veil.material.opacity < 0) {
+						veil.material.opacity = 0;
+						scene.remove(veil);
+					}
+				}
+
+				let date = new Date();
+				let mins = date.getMinutes();
+
+				let text = DAYS[date.getDay()] + " " + (hourOverride != -1 ? hourOverride + ":00" : date.getHours() + (date.getSeconds() % 2 == 0 ? ":": " ") + (mins < 10 ? "0" : "") + mins);
+
+				if(text != label.text)
+					label.SetText(text);
+			}
+/*
+			animate
+
+			The entire scene is updated.
+			Works similar to Unity's Update.
+*/
+			function animate() {
+				
+				let time = Date.now() * 0.001;
+
+				deltaTime = time - prevTime;	// Same as Unity's Time.deltaTime
+
+				if(deltaTime > MAX_DELTA_TIME)
+					deltaTime = MAX_DELTA_TIME;
+
+				prevTime = time;
+
+				prevCamPosition.x = camera.position.x;
+				prevCamPosition.y = camera.position.y;
+				prevCamPosition.z = camera.position.z;
+
+				noiseX += deltaTime * 0.3;
+
+				camera.position.x = noise.perlin2(noiseX, 0) - 0.5;
+				camera.position.y = noise.perlin2(noiseX, 500) - 0.5;
+				camera.position.z += deltaTime * CAM_SPEED;
+
+				UpdateGenerators();
+				UpdateSky();
+				UpdateClouds();
+				UpdateUI();
+
+				requestAnimationFrame(animate);
+				renderer.render(scene, camera);
+			}
+/*
+			ResizeCanvas
+
+			Canvas is resized if window changes size or device changes orientation.
+*/
+			function ResizeCanvas() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize(window.innerWidth, window.innerHeight);
+			}
+
+		</script>
+	</body>
+
+</html>
