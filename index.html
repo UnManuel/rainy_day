@@ -93,6 +93,8 @@
 			let rainAmounts;		// Loaded rain amounts for each day of the week
 
 			let noiseX;				// General-purpose natural noise cursor
+
+			let texCount;			// A counter to keep track of loaded textures
 /*
 			Startup
 
@@ -101,7 +103,6 @@
 			function Startup() {
 				Init();
 				Setup();
-				LoadData();
 			}
 /*
 			Init
@@ -128,11 +129,6 @@
 			Creates the contents of the scene and sets startup values.
 */
 			function Setup() {
-				
-				CreateGenerators();
-				CreateSky();
-				CreateClouds();
-				CreateUI();
 
 				prevTime = Date.now() * 0.001;
 
@@ -145,6 +141,13 @@
 				defaultRainAmount = MAX_RAIN_AMOUNT;
 
 				noiseX = 0;
+
+				texCount = 0;
+				
+				CreateGenerators();
+				CreateSky();
+				CreateClouds();
+				CreateUI();
 			}
 /*
 			CreateGenerators
@@ -154,7 +157,7 @@
 */
 			function CreateGenerators() {
 
-				let dropTex = new THREE.TextureLoader().load("img/raindrop.png"); // Drop asset
+				let dropTex = LoadTexture("img/raindrop.png"); // Drop asset
 				let dropMat = new THREE.SpriteMaterial({ map: dropTex, rotation: Math.PI / 8 });
 				
 				let dropPool = [];	// An object pool to be shared by all generators
@@ -184,7 +187,7 @@
 				skyMaterials = [];
 
 				for(let i = 0; i < 24; ++i) {
-					tex = new THREE.TextureLoader().load("img/sky_" + (i < 10 ? "0" : "") + i + ".png");
+					tex = LoadTexture("img/sky_" + (i < 10 ? "0" : "") + i + ".png");
 					skyMaterials[i] = new THREE.MeshBasicMaterial({ map: tex, fog: false });
 				}
 
@@ -201,9 +204,9 @@
 */
 			function CreateClouds() {
 
-				let texA = new THREE.TextureLoader().load("img/cloud_a.png");
-				let texB = new THREE.TextureLoader().load("img/cloud_b.png");
-				let texC = new THREE.TextureLoader().load("img/cloud_c.png");
+				let texA = LoadTexture("img/cloud_a.png");
+				let texB = LoadTexture("img/cloud_b.png");
+				let texC = LoadTexture("img/cloud_c.png");
 
 				let texs = [texA, texB, texC];
 
@@ -221,7 +224,7 @@
 */
 			function CreateUI() {
 
-				let tex = new THREE.TextureLoader().load("img/logo.png");
+				let tex = LoadTexture("img/logo.png");
 				let mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, fog: false });
 
 				veil = new THREE.Mesh(new THREE.PlaneGeometry(18, 9), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, fog: false }));
@@ -237,6 +240,24 @@
 				label = new Label("", 0, -0.1, -1);
 				
 				scene.add(label.mesh);
+			}
+/*
+			LoadTexture
+
+			Loads a texture and keeps track of the overall texture loading.
+*/
+			function LoadTexture(path) {
+
+				++texCount;
+
+				let tex = new THREE.TextureLoader().load(path,
+					function(tex) {
+						if(--texCount == 0)
+							LoadData();
+					}
+				);
+
+				return tex;
 			}
 /*
 			LoadData
